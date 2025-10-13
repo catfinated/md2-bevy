@@ -3,8 +3,7 @@ pub mod md2 {
 use std::fs::File;
 use std::io::{BufReader, Read, SeekFrom, Seek};
 
-use bevy::prelude::Vec3;
-
+use bevy::prelude::{Vec2, Vec3};
 
 #[derive(Debug)]
 #[repr(C)]
@@ -61,18 +60,19 @@ struct Frame {
     scale: [f32; 3],
     translate: [f32; 3],
     name: [u8; 16],
-    // vector<Vertex>
 }
 
 #[derive(Debug)]
 pub struct KeyFrame {
     pub vertices: Vec<Vec3>,
+    pub normals: Vec<Vec3>,
 }
 
 #[derive(Debug)]
 pub struct Mesh {
     pub header: Header,
     pub key_frames: Vec<KeyFrame>,
+    pub texcoords: Vec<Vec2>,
 }
 
 impl Mesh {
@@ -100,6 +100,36 @@ impl Mesh {
         }
 
         println!("loaded {} triangles", triangles.len());
+
+        // load texcoords
+        let num_st = usize::try_from(header.num_st).unwrap();
+        let st_off = u64::try_from(header.offset_st).unwrap();
+        let mut unscaled_texcoords = Vec::new();
+        unscaled_texcoords.reserve(num_st);
+        reader.seek(SeekFrom::Start(st_off)).unwrap();
+
+        for _ in 0..num_st {
+            let mut stbuf = [0; std::mem::size_of::<TexCoord>()];
+            reader.read_exact(&mut stbuf).unwrap();
+            let texcoord: TexCoord = unsafe { std::mem::transmute(stbuf) };
+            unscaled_texcoords.push(texcoord);
+        }
+
+        let skin_width = header.skinwidth as f32;
+        let skin_height = header.skinheight as f32;
+
+        let mut texcoords = Vec::new();
+        texcoords.reserve(num_tris * 3);
+
+        for tri in &triangles {
+            for i in 0..3 {
+                let index = usize::try_from(tri.st[i]).unwrap();
+                let texcoord = &unscaled_texcoords[index];
+                let s = f32::try_from(texcoord.s).unwrap() / skin_width;
+                let t = f32::try_from(texcoord.t).unwrap() / skin_height;
+                texcoords.push(Vec2::new(s, t));
+            }
+        }
 
         // load frames
         let num_frames = usize::try_from(header.num_frames).unwrap();
@@ -131,23 +161,39 @@ impl Mesh {
 
             let mut vertices = Vec::new();
             vertices.reserve(num_tris * 3);
+            let mut normals = Vec::new();
+            normals.reserve(num_tris * 3);
 
             for tri in &triangles {
                 for i in 0..3 {
                     let vi = usize::try_from(tri.vertex[i]).unwrap();
                     let vertex = &unscaled_vertices[vi];
+                    // NB: pay attention to the assingments here as we swap z and y
                     let x = (frame.scale[0] * vertex.v[0] as f32) + frame.translate[0];
-                    let y = (frame.scale[1] * vertex.v[1] as f32) + frame.translate[1];
-                    let z = (frame.scale[2] * vertex.v[2] as f32) + frame.translate[2];
+                    let z = (frame.scale[1] * vertex.v[1] as f32) + frame.translate[1];
+                    let y = (frame.scale[2] * vertex.v[2] as f32) + frame.translate[2];
                     vertices.push(Vec3::new(x, y, z));
                 }
+
+                let v0 = &vertices[vertices.len() - 3];
+                let v1 = &vertices[vertices.len() - 2];
+                let v2 = &vertices[vertices.len() - 1];
+
+                let a = v1 - v0;
+                let b = v2 - v0;
+                let c = a.cross(b);
+                let n = c.normalize();
+
+                normals.push(n);
+                normals.push(n);
+                normals.push(n);
             }
 
-            key_frames.push(KeyFrame{ vertices } );
+            key_frames.push(KeyFrame{ vertices, normals } );
 
         }
 
-        Mesh{ header, key_frames }
+        Mesh{ header, key_frames, texcoords }
     }
 }
 
