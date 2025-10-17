@@ -2,7 +2,7 @@ pub mod md2 {
 
     use glob::glob;
     use std::fs::File;
-    use std::io::{BufReader, Read, Seek, SeekFrom};
+    use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
     use std::path::{Path, PathBuf};
 
     use bevy::prelude::{Vec2, Vec3};
@@ -58,22 +58,31 @@ pub mod md2 {
         name: [u8; 16],
     }
 
+    type KeyFrame = Vec<Vec3>;
+
     #[derive(Debug)]
-    pub struct KeyFrame {
-        pub vertices: Vec<Vec3>,
-        pub normals: Vec<Vec3>,
+    pub struct Animation {
+        pub name: String,
+        pub key_frames: Vec<KeyFrame>,
     }
 
     #[derive(Debug)]
-    pub struct Mesh {
-        pub header: Header,
-        pub key_frames: Vec<KeyFrame>,
+    pub struct MD2 {
+        pub animations: Vec<Animation>,
         pub texcoords: Vec<Vec2>,
         pub skins: Vec<PathBuf>,
     }
 
-    impl Mesh {
-        pub fn load(fpath: &String) -> Mesh {
+    impl Frame {
+        fn get_name(&self) -> String {
+            let s = String::from_utf8_lossy(&self.name);
+            let t = s.trim_end_matches(|c: char| c.is_ascii_control() || c.is_ascii_digit());
+            t.to_string()
+        }
+    }
+
+    impl MD2 {
+        pub fn load(fpath: &Path) -> MD2 {
             let inf = File::open(fpath).unwrap();
             let mut reader = BufReader::new(inf);
 
@@ -82,7 +91,19 @@ pub mod md2 {
             reader.read_exact(&mut buffer).unwrap();
             let header: Header = unsafe { std::mem::transmute(buffer) };
 
-            // load triangles
+            let triangles = MD2::load_triangles(&mut reader, &header);
+            let texcoords = MD2::load_texcoords(&mut reader, &header, &triangles);
+            let animations = MD2::load_animations(&mut reader, &header, &triangles);
+            let skins = MD2::find_skins(fpath); // skins - only from directory right now
+
+            MD2 {
+                animations,
+                texcoords,
+                skins,
+            }
+        }
+
+        fn load_triangles<R: BufRead + Seek>(reader: &mut R, header: &Header) -> Vec<Triangle> {
             let mut triangles = Vec::new();
             let num_tris = usize::try_from(header.num_tris).unwrap();
             triangles.reserve(num_tris);
@@ -96,9 +117,14 @@ pub mod md2 {
                 triangles.push(triangle);
             }
 
-            println!("loaded {} triangles", triangles.len());
+            triangles
+        }
 
-            // load texcoords
+        fn load_texcoords<R: BufRead + Seek>(
+            reader: &mut R,
+            header: &Header,
+            triangles: &Vec<Triangle>,
+        ) -> Vec<Vec2> {
             let num_st = usize::try_from(header.num_st).unwrap();
             let st_off = u64::try_from(header.offset_st).unwrap();
             let mut unscaled_texcoords = Vec::new();
@@ -116,9 +142,9 @@ pub mod md2 {
             let skin_height = header.skinheight as f32;
 
             let mut texcoords = Vec::new();
-            texcoords.reserve(num_tris * 3);
+            texcoords.reserve(triangles.len() * 3);
 
-            for tri in &triangles {
+            for tri in triangles {
                 for i in 0..3 {
                     let index = usize::try_from(tri.st[i]).unwrap();
                     let texcoord = &unscaled_texcoords[index];
@@ -128,84 +154,100 @@ pub mod md2 {
                 }
             }
 
-            // load frames
-            let num_frames = usize::try_from(header.num_frames).unwrap();
-            let mut frames: Vec<Frame> = Vec::new();
-            frames.reserve(num_frames);
-            let mut key_frames: Vec<KeyFrame> = Vec::new();
-            key_frames.reserve(num_frames);
+            texcoords
+        }
 
-            let frames_off = u64::try_from(header.offset_frames).unwrap();
-            reader.seek(SeekFrom::Start(frames_off)).unwrap();
+        fn read_and_decompress_vertices<R: BufRead + Seek>(
+            reader: &mut R,
+            num_xyz: usize,
+            frame: &Frame,
+            triangles: &Vec<Triangle>,
+        ) -> Vec<Vec3> {
+            let mut raw_vertices: Vec<Vertex> = Vec::new();
+            raw_vertices.reserve(num_xyz);
 
+            for _ in 0..num_xyz {
+                let mut vbuf = [0; std::mem::size_of::<Vertex>()];
+                reader.read_exact(&mut vbuf).unwrap();
+                let vertex: Vertex = unsafe { std::mem::transmute(vbuf) };
+                raw_vertices.push(vertex);
+            }
+
+            let mut vertices = Vec::new();
+            vertices.reserve(triangles.len() * 3);
+
+            for tri in triangles {
+                for i in 0..3 {
+                    let vi = usize::try_from(tri.vertex[i]).unwrap();
+                    let vertex = &raw_vertices[vi];
+                    // NB: pay attention to the assingments here as we swap z and y
+                    let x = (frame.scale[0] * vertex.v[0] as f32) + frame.translate[0];
+                    let z = (frame.scale[1] * vertex.v[1] as f32) + frame.translate[1];
+                    let y = (frame.scale[2] * vertex.v[2] as f32) + frame.translate[2];
+                    vertices.push(Vec3::new(x, y, z));
+                }
+            }
+
+            vertices
+        }
+
+        fn load_animations<R: BufRead + Seek>(
+            reader: &mut R,
+            header: &Header,
+            triangles: &Vec<Triangle>,
+        ) -> Vec<Animation> {
             let num_xyz = usize::try_from(header.num_xyz).unwrap();
+            let mut key_frames: Vec<KeyFrame> = Vec::new();
+            let mut animations: Vec<Animation> = Vec::new();
+            let mut last_frame_name: Option<String> = None;
+            let frames_off = u64::try_from(header.offset_frames).unwrap();
+
+            reader.seek(SeekFrom::Start(frames_off)).unwrap();
 
             for _ in 0..header.num_frames {
                 let mut fbuf = [0; std::mem::size_of::<Frame>()];
                 reader.read_exact(&mut fbuf).unwrap();
                 let frame: Frame = unsafe { std::mem::transmute(fbuf) };
+                let vertices =
+                    MD2::read_and_decompress_vertices(reader, num_xyz, &frame, triangles);
 
-                let mut unscaled_vertices: Vec<Vertex> = Vec::new();
-                unscaled_vertices.reserve(num_xyz);
+                let curr_name = frame.get_name();
+                if let Some(prev_name) = last_frame_name {
+                    if prev_name != curr_name {
+                        animations.push(Animation {
+                            name: prev_name.clone(),
+                            key_frames,
+                        });
 
-                for _ in 0..num_xyz {
-                    let mut vbuf = [0; std::mem::size_of::<Vertex>()];
-                    reader.read_exact(&mut vbuf).unwrap();
-                    let vertex: Vertex = unsafe { std::mem::transmute(vbuf) };
-                    unscaled_vertices.push(vertex);
-                }
-
-                let mut vertices = Vec::new();
-                vertices.reserve(num_tris * 3);
-                let mut normals = Vec::new();
-                normals.reserve(num_tris * 3);
-
-                for tri in &triangles {
-                    for i in 0..3 {
-                        let vi = usize::try_from(tri.vertex[i]).unwrap();
-                        let vertex = &unscaled_vertices[vi];
-                        // NB: pay attention to the assingments here as we swap z and y
-                        let x = (frame.scale[0] * vertex.v[0] as f32) + frame.translate[0];
-                        let z = (frame.scale[1] * vertex.v[1] as f32) + frame.translate[1];
-                        let y = (frame.scale[2] * vertex.v[2] as f32) + frame.translate[2];
-                        vertices.push(Vec3::new(x, y, z));
+                        key_frames = Vec::new();
                     }
-
-                    let v0 = &vertices[vertices.len() - 3];
-                    let v1 = &vertices[vertices.len() - 2];
-                    let v2 = &vertices[vertices.len() - 1];
-
-                    let a = v1 - v0;
-                    let b = v2 - v0;
-                    let c = a.cross(b);
-                    let n = c.normalize();
-
-                    normals.push(n);
-                    normals.push(n);
-                    normals.push(n);
                 }
+                last_frame_name = Some(curr_name);
 
-                key_frames.push(KeyFrame { vertices, normals });
+                key_frames.push(vertices);
             }
 
-            // skins - only from directory right now
-            let p = Path::new(fpath).parent().unwrap().join("*.png");
-            let pat = p.as_path().to_str().unwrap();
+            if !key_frames.is_empty() {
+                animations.push(Animation {
+                    name: last_frame_name.unwrap(),
+                    key_frames,
+                });
+            }
 
+            animations
+        }
+
+        fn find_skins(fpath: &Path) -> Vec<PathBuf> {
+            let glob_path = fpath.parent().unwrap().join("*.png");
+            let pattern = glob_path.to_str().unwrap();
             let mut skins = Vec::new();
 
-            for entry in glob(pat).unwrap().filter_map(Result::ok) {
+            for entry in glob(pattern).unwrap().filter_map(Result::ok) {
                 let fpath = entry.strip_prefix("assets").unwrap();
-                println!("{}", fpath.display());
                 skins.push(fpath.to_path_buf());
             }
 
-            Mesh {
-                header,
-                key_frames,
-                texcoords,
-                skins,
-            }
+            skins
         }
     }
 }
