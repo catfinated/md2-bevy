@@ -67,10 +67,16 @@ pub mod md2 {
     }
 
     #[derive(Debug)]
+    pub struct Skin {
+        pub name: String,
+        pub path: PathBuf,
+    }
+
+    #[derive(Debug)]
     pub struct MD2 {
         pub animations: Vec<Animation>,
         pub texcoords: Vec<Vec2>,
-        pub skins: Vec<PathBuf>,
+        pub skins: Vec<Skin>,
     }
 
     impl Frame {
@@ -237,14 +243,15 @@ pub mod md2 {
             animations
         }
 
-        fn find_skins(fpath: &Path) -> Vec<PathBuf> {
+        fn find_skins(fpath: &Path) -> Vec<Skin> {
             let glob_path = fpath.parent().unwrap().join("*.png");
             let pattern = glob_path.to_str().unwrap();
             let mut skins = Vec::new();
 
             for entry in glob(pattern).unwrap().filter_map(Result::ok) {
-                let fpath = entry.strip_prefix("assets").unwrap();
-                skins.push(fpath.to_path_buf());
+                let path = entry.strip_prefix("assets").unwrap().to_path_buf();
+                let name = path.file_stem().unwrap().to_str().unwrap().to_string();
+                skins.push(Skin { name, path });
             }
 
             skins
