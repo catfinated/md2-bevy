@@ -1,6 +1,13 @@
 pub mod md2 {
 
+    use bevy::{
+        asset::{AssetPath, RenderAssetUsages},
+        prelude::*,
+        render::render_resource::PrimitiveTopology,
+    };
+
     use glob::glob;
+    use rand::prelude::*;
     use std::fs::File;
     use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
     use std::path::{Path, PathBuf};
@@ -9,7 +16,7 @@ pub mod md2 {
 
     #[derive(Debug)]
     #[repr(C)]
-    pub struct Header {
+    struct Header {
         ident: i32,
         version: i32,
         skinwidth: i32,
@@ -73,10 +80,20 @@ pub mod md2 {
     }
 
     #[derive(Debug)]
-    pub struct MD2 {
-        pub animations: Vec<Animation>,
-        pub texcoords: Vec<Vec2>,
-        pub skins: Vec<Skin>,
+    struct MD2 {
+        animations: Vec<Animation>,
+        texcoords: Vec<Vec2>,
+        skins: Vec<Skin>,
+    }
+
+    #[derive(Component)]
+    pub struct MD2Component {
+        md2: MD2,
+        pub skin_idx: usize,
+        pub anim_idx: usize,
+        curr_frame: usize,
+        interp: f32,
+        materials: Vec<Option<Handle<StandardMaterial>>>,
     }
 
     impl Frame {
@@ -256,5 +273,147 @@ pub mod md2 {
 
             skins
         }
+    }
+
+    impl MD2Component {
+        fn load(fpath: &Path) -> Self {
+            let md2 = MD2::load(fpath);
+            let skin_idx = rand::rng().random_range(0..md2.skins.len());
+            let anim_idx = rand::rng().random_range(0..md2.animations.len());
+            let materials: Vec<Option<Handle<StandardMaterial>>> = vec![None; md2.skins.len()];
+
+            Self {
+                md2,
+                skin_idx,
+                anim_idx,
+                curr_frame: 0,
+                interp: 0.0,
+                materials,
+            }
+        }
+
+        // Skins
+        pub fn skins(&self) -> &[Skin] {
+            &self.md2.skins
+        }
+
+        pub fn skin_name(&self) -> &str {
+            &self.md2.skins[self.skin_idx].name
+        }
+
+        pub fn next_skin(
+            &mut self,
+            asset_server: &Res<AssetServer>,
+            materials: &mut ResMut<Assets<StandardMaterial>>,
+        ) -> MeshMaterial3d<StandardMaterial> {
+            let new_idx = (self.skin_idx + 1) % self.md2.skins.len();
+            self.set_skin_idx(new_idx, asset_server, materials)
+        }
+
+        pub fn set_skin_idx(
+            &mut self,
+            idx: usize,
+            asset_server: &Res<AssetServer>,
+            materials: &mut ResMut<Assets<StandardMaterial>>,
+        ) -> MeshMaterial3d<StandardMaterial> {
+            self.skin_idx = idx;
+
+            if self.materials[idx].is_none() {
+                let path = AssetPath::from_path_buf(self.md2.skins[idx].path.clone());
+                let texture_handle: Handle<Image> = asset_server.load(path);
+                let mat_handle: Handle<StandardMaterial> = materials.add(StandardMaterial {
+                    base_color_texture: Some(texture_handle),
+                    unlit: true,
+                    ..default()
+                });
+
+                self.materials[idx] = Some(mat_handle);
+            }
+
+            MeshMaterial3d(self.materials[idx].as_ref().unwrap().clone())
+        }
+
+        // Animations
+        pub fn animations(&self) -> &[Animation] {
+            &self.md2.animations
+        }
+
+        fn num_anim_frames(&self) -> usize {
+            self.md2.animations[self.anim_idx].key_frames.len()
+        }
+
+        pub fn next_anim(&mut self) {
+            let next = (self.anim_idx + 1) % self.md2.animations.len();
+            self.set_anim_idx(next);
+        }
+
+        pub fn anim_name(&self) -> &str {
+            &self.md2.animations[self.anim_idx].name
+        }
+
+        pub fn set_anim_idx(&mut self, idx: usize) {
+            self.anim_idx = idx;
+            self.curr_frame = 0;
+            self.interp = 0.0;
+        }
+
+        pub fn animate(&mut self, delta: f32) -> Vec<Vec3> {
+            let mut interp = self.interp + (8.0f32 * delta);
+            let mut current = self.curr_frame;
+            let mut next = (current + 1) % self.num_anim_frames();
+
+            if interp >= 1.0f32 {
+                current = next;
+                next = (current + 1) % self.num_anim_frames();
+                interp = 0.0f32;
+            }
+            self.interp = interp;
+            self.curr_frame = current;
+
+            let curr_v = &self.md2.animations[self.anim_idx].key_frames[current];
+            let next_v = &self.md2.animations[self.anim_idx].key_frames[next];
+            let mut v = Vec::new();
+            v.reserve(curr_v.len());
+
+            for i in 0..curr_v.len() {
+                v.push(curr_v[i].lerp(next_v[i], interp));
+            }
+
+            v
+        }
+
+        fn create_mesh(&self) -> Mesh {
+            Mesh::new(
+                PrimitiveTopology::TriangleList,
+                RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
+            )
+            .with_inserted_attribute(
+                Mesh::ATTRIBUTE_POSITION,
+                self.md2.animations[self.anim_idx].key_frames[self.curr_frame].clone(),
+            )
+            .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, self.md2.texcoords.clone())
+        }
+    }
+
+    pub fn spawn_md2(
+        path: &Path,
+        commands: &mut Commands,
+        asset_server: &Res<AssetServer>,
+        materials: &mut ResMut<Assets<StandardMaterial>>,
+        meshes: &mut ResMut<Assets<Mesh>>,
+    ) {
+        let mut md2 = MD2Component::load(path);
+        let mat3d = md2.set_skin_idx(md2.skin_idx, asset_server, materials);
+        let mesh_handle: Handle<Mesh> = meshes.add(md2.create_mesh());
+        let scale = 1.0_f32 / 32.0_f32;
+        let neg90 = f32::to_radians(-90.0);
+
+        commands.spawn((
+            Mesh3d(mesh_handle),
+            mat3d,
+            Transform::from_rotation(Quat::from_euler(EulerRot::XYZEx, 0.0, neg90, 0.0))
+                .with_scale(Vec3::splat(scale)),
+            md2,
+        ));
     }
 }
