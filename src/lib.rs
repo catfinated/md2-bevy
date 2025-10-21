@@ -1,3 +1,5 @@
+pub mod camera;
+
 pub mod md2 {
 
     use bevy::{
@@ -99,8 +101,12 @@ pub mod md2 {
     impl Frame {
         fn get_name(&self) -> String {
             let s = String::from_utf8_lossy(&self.name);
-            let t = s.trim_end_matches(|c: char| c.is_ascii_control() || c.is_ascii_digit());
-            t.to_string()
+            let mut end = s.len();
+            if let Some(index) = s.find(|c: char| c.is_ascii_digit() || c.is_ascii_control()) {
+                end = index;
+            }
+
+            s[0..end].to_string()
         }
     }
 
@@ -411,9 +417,22 @@ pub mod md2 {
         commands.spawn((
             Mesh3d(mesh_handle),
             mat3d,
-            Transform::from_rotation(Quat::from_euler(EulerRot::XYZEx, 0.0, neg90, 0.0))
+            Transform::from_rotation(Quat::from_euler(EulerRot::ZYX, 0.0, neg90, 0.0))
                 .with_scale(Vec3::splat(scale)),
             md2,
         ));
+    }
+
+    pub fn find_md2(assets_path: &Path) -> Vec<PathBuf> {
+        let glob_path = assets_path.join("**").join("*.md2");
+        let pattern = glob_path.to_str().unwrap();
+        let mut paths = Vec::new();
+
+        for entry in glob(pattern).unwrap().filter_map(Result::ok) {
+            let path = entry.to_path_buf();
+            paths.push(path);
+        }
+
+        paths
     }
 }

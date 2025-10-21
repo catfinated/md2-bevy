@@ -1,7 +1,9 @@
 use bevy::{camera::visibility::RenderLayers, prelude::*};
 use bevy_egui::{egui, EguiContexts, EguiPlugin, EguiPrimaryContextPass, PrimaryEguiContext};
+use md2_bevy::camera::{camera_control_system, CameraController};
 
-use md2_bevy::md2::{spawn_md2, MD2Component};
+use md2_bevy::md2::{find_md2, spawn_md2, MD2Component};
+use rand::prelude::*;
 use std::path::Path;
 
 fn main() {
@@ -9,7 +11,14 @@ fn main() {
         .add_plugins(DefaultPlugins)
         .add_plugins(EguiPlugin::default())
         .add_systems(Startup, setup)
-        .add_systems(Update, (keyboard_input_system, animation_system))
+        .add_systems(
+            Update,
+            (
+                camera_control_system,
+                keyboard_input_system,
+                animation_system,
+            ),
+        )
         .add_systems(EguiPrimaryContextPass, ui_system)
         .run();
 }
@@ -20,8 +29,11 @@ fn setup(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut meshes: ResMut<Assets<Mesh>>,
 ) {
+    let all_md2 = find_md2(&Path::new("assets"));
+    let md2_idx = rand::rng().random_range(0..all_md2.len());
+
     spawn_md2(
-        &Path::new("assets/models/ogro/tris.md2"),
+        &all_md2[md2_idx],
         &mut commands,
         &asset_server,
         &mut materials,
@@ -29,10 +41,21 @@ fn setup(
     );
 
     // Transform for the camera and lighting, looking at (0,0,0) (the position of the mesh).
-    let camera_transform = Transform::from_xyz(1.0, 1.0, 3.0).looking_at(Vec3::ZERO, Vec3::Y);
+    let camera_transform = Transform::from_xyz(0.0, 0.0, 3.0).looking_at(
+        Vec3 {
+            x: 0.0,
+            y: 0.0,
+            z: -1.0,
+        },
+        Vec3::Y,
+    );
 
     // Camera in 3D space.
-    commands.spawn((Camera3d::default(), camera_transform));
+    commands.spawn((
+        Camera3d::default(),
+        camera_transform,
+        CameraController::default(),
+    ));
 
     commands.spawn((
         // The `PrimaryEguiContext` component requires everything needed to render a primary context.
@@ -54,13 +77,13 @@ fn keyboard_input_system(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut query: Query<(Entity, &mut MD2Component)>,
 ) {
-    if keyboard_input.just_pressed(KeyCode::KeyS) {
+    if keyboard_input.just_pressed(KeyCode::KeyZ) {
         let (entity, mut md2) = query.single_mut().unwrap();
         let new_mat = md2.next_skin(&asset_server, &mut materials);
         commands.entity(entity).insert(new_mat);
     }
 
-    if keyboard_input.just_pressed(KeyCode::KeyA) {
+    if keyboard_input.just_pressed(KeyCode::KeyX) {
         let (_, mut md2) = query.single_mut().unwrap();
         md2.next_anim();
     }
@@ -89,7 +112,7 @@ fn ui_system(
     let mut curr_anim = md2.anim_idx;
 
     egui::Window::new("MD2").show(contexts.ctx_mut()?, |ui| {
-        egui::ComboBox::from_label("[s]kin")
+        egui::ComboBox::from_label("skin")
             .selected_text(md2.skin_name())
             .show_ui(ui, |ui| {
                 for (idx, skin) in md2.skins().iter().enumerate() {
@@ -102,7 +125,7 @@ fn ui_system(
             commands.entity(entity).insert(new_mat);
         }
 
-        egui::ComboBox::from_label("[a]nim")
+        egui::ComboBox::from_label("anim")
             .selected_text(md2.anim_name())
             .show_ui(ui, |ui| {
                 for (idx, anim) in md2.animations().iter().enumerate() {
