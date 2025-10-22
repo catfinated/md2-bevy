@@ -109,6 +109,16 @@ pub struct MD2Component {
     materials: Vec<Option<Handle<StandardMaterial>>>,
 }
 
+/// Resource for available MD2 models
+///
+/// Tracks which model is currently selected.
+#[derive(Resource)]
+pub struct MD2Resource {
+    fpaths: Vec<PathBuf>,
+    pub names: Vec<String>,
+    pub curr_idx: usize,
+}
+
 impl Frame {
     fn get_name(&self) -> String {
         let s = String::from_utf8_lossy(&self.name);
@@ -411,6 +421,48 @@ impl MD2Component {
     }
 }
 
+impl MD2Resource {
+    pub fn load(dpath: &Path) -> Self {
+        let fpaths = find_md2(dpath);
+        let names = fpaths
+            .iter()
+            .map(|p| MD2Resource::get_model_name(p.as_path()))
+            .collect();
+        let curr_idx = rand::rng().random_range(0..fpaths.len());
+
+        MD2Resource {
+            fpaths,
+            names,
+            curr_idx,
+        }
+    }
+
+    pub fn curr_path(&self) -> &Path {
+        &self.fpaths[self.curr_idx]
+    }
+
+    pub fn curr_name(&self) -> &str {
+        &self.names[self.curr_idx]
+    }
+
+    fn get_model_name(fpath: &Path) -> String {
+        let model = fpath
+            .parent()
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap();
+
+        if fpath.file_name().unwrap() != "tris.md2" {
+            let fstem = fpath.file_stem().unwrap().to_str().unwrap();
+            format!("{}/{}", model, fstem)
+        } else {
+            model.to_string()
+        }
+    }
+}
+
 /// Spawn a new MD2 instance
 pub fn spawn_md2(
     path: &Path,
@@ -435,7 +487,7 @@ pub fn spawn_md2(
 }
 
 /// Find all .md2 files on disk
-pub fn find_md2(assets_path: &Path) -> Vec<PathBuf> {
+fn find_md2(assets_path: &Path) -> Vec<PathBuf> {
     let glob_path = assets_path.join("**").join("*.md2");
     let pattern = glob_path.to_str().unwrap();
     let mut paths = Vec::new();

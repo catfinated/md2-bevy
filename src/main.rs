@@ -2,14 +2,14 @@ use bevy::{camera::visibility::RenderLayers, prelude::*};
 use bevy_egui::{egui, EguiContexts, EguiPlugin, EguiPrimaryContextPass, PrimaryEguiContext};
 use md2_bevy::camera::{camera_control_system, CameraController};
 
-use md2_bevy::md2::{find_md2, spawn_md2, MD2Component};
-use rand::prelude::*;
+use md2_bevy::md2::{spawn_md2, MD2Component, MD2Resource};
 use std::path::Path;
 
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
         .add_plugins(EguiPlugin::default())
+        .insert_resource(MD2Resource::load(&Path::new("assets")))
         .add_systems(Startup, setup)
         .add_systems(
             Update,
@@ -28,12 +28,10 @@ fn setup(
     asset_server: Res<AssetServer>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut meshes: ResMut<Assets<Mesh>>,
+    md2s: Res<MD2Resource>,
 ) {
-    let all_md2 = find_md2(&Path::new("assets"));
-    let md2_idx = rand::rng().random_range(0..all_md2.len());
-
     spawn_md2(
-        &all_md2[md2_idx],
+        md2s.curr_path(),
         &mut commands,
         &asset_server,
         &mut materials,
@@ -104,14 +102,37 @@ fn ui_system(
     mut contexts: EguiContexts,
     mut commands: Commands,
     asset_server: Res<AssetServer>,
+    mut md2s: ResMut<MD2Resource>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut meshes: ResMut<Assets<Mesh>>,
     mut query: Query<(Entity, &mut MD2Component)>,
 ) -> Result {
     let (entity, mut md2) = query.single_mut()?;
     let mut curr_skin = md2.skin_idx;
     let mut curr_anim = md2.anim_idx;
+    let mut curr_md2 = md2s.curr_idx;
 
     egui::Window::new("MD2").show(contexts.ctx_mut()?, |ui| {
+        egui::ComboBox::from_label("md2")
+            .selected_text(md2s.curr_name())
+            .show_ui(ui, |ui| {
+                for (idx, name) in md2s.names.iter().enumerate() {
+                    ui.selectable_value(&mut curr_md2, idx, name);
+                }
+            });
+
+        if curr_md2 != md2s.curr_idx {
+            md2s.curr_idx = curr_md2;
+            commands.entity(entity).despawn();
+            spawn_md2(
+                md2s.curr_path(),
+                &mut commands,
+                &asset_server,
+                &mut materials,
+                &mut meshes,
+            );
+        }
+
         egui::ComboBox::from_label("skin")
             .selected_text(md2.skin_name())
             .show_ui(ui, |ui| {
