@@ -1,15 +1,16 @@
 use bevy::{camera::visibility::RenderLayers, prelude::*};
-use bevy_egui::{egui, EguiContexts, EguiPlugin, EguiPrimaryContextPass, PrimaryEguiContext};
-use md2_bevy::camera::{camera_control_system, CameraController};
-
-use md2_bevy::md2::{spawn_md2, MD2Component, MD2Resource};
+use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, PrimaryEguiContext, egui};
+use md2_bevy::camera::{CameraController, camera_control_system};
+use md2_bevy::md2::{MD2Component, MD2Resource, spawn_md2};
+use md2_bevy::pcx::PcxLoaderPlugin;
 use std::path::Path;
 
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
+        .add_plugins(PcxLoaderPlugin)
         .add_plugins(EguiPlugin::default())
-        .insert_resource(MD2Resource::load(&Path::new("assets")))
+        .insert_resource(MD2Resource::load(Path::new("assets")))
         .add_systems(Startup, setup)
         .add_systems(
             Update,
@@ -58,7 +59,7 @@ fn setup(
     commands.spawn((
         // The `PrimaryEguiContext` component requires everything needed to render a primary context.
         PrimaryEguiContext,
-        Camera2d::default(),
+        Camera2d,
         // Setting RenderLayers to none makes sure we won't render anything apart from the UI.
         RenderLayers::none(),
         Camera {

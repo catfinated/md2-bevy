@@ -3191,6 +3191,7 @@ dependencies = [
  "bevy_egui",
  "glob",
  "rand",
+ "thiserror 2.0.17",
 ]
 
 [[package]]

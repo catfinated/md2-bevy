@@ -7,6 +7,7 @@ use bevy::{
 
 use glob::glob;
 use rand::prelude::*;
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -177,8 +178,7 @@ impl MD2 {
     ) -> Vec<Vec2> {
         let num_st = usize::try_from(header.num_st).unwrap();
         let st_off = u64::try_from(header.offset_st).unwrap();
-        let mut unscaled_texcoords = Vec::new();
-        unscaled_texcoords.reserve(num_st);
+        let mut unscaled_texcoords = Vec::with_capacity(num_st);
         reader.seek(SeekFrom::Start(st_off)).unwrap();
 
         for _ in 0..num_st {
@@ -191,15 +191,14 @@ impl MD2 {
         let skin_width = header.skinwidth as f32;
         let skin_height = header.skinheight as f32;
 
-        let mut texcoords = Vec::new();
-        texcoords.reserve(triangles.len() * 3);
+        let mut texcoords = Vec::with_capacity(triangles.len() * 3);
 
         for tri in triangles {
             for i in 0..3 {
-                let index = usize::try_from(tri.st[i]).unwrap();
+                let index = usize::from(tri.st[i]);
                 let texcoord = &unscaled_texcoords[index];
-                let s = f32::try_from(texcoord.s).unwrap() / skin_width;
-                let t = f32::try_from(texcoord.t).unwrap() / skin_height;
+                let s = f32::from(texcoord.s) / skin_width;
+                let t = f32::from(texcoord.t) / skin_height;
                 texcoords.push(Vec2::new(s, t));
             }
         }
@@ -213,8 +212,7 @@ impl MD2 {
         frame: &Frame,
         triangles: &Vec<Triangle>,
     ) -> Vec<Vec3> {
-        let mut raw_vertices: Vec<Vertex> = Vec::new();
-        raw_vertices.reserve(num_xyz);
+        let mut raw_vertices: Vec<Vertex> = Vec::with_capacity(num_xyz);
 
         for _ in 0..num_xyz {
             let mut vbuf = [0; std::mem::size_of::<Vertex>()];
@@ -223,12 +221,11 @@ impl MD2 {
             raw_vertices.push(vertex);
         }
 
-        let mut vertices = Vec::new();
-        vertices.reserve(triangles.len() * 3);
+        let mut vertices = Vec::with_capacity(triangles.len() * 3);
 
         for tri in triangles {
             for i in 0..3 {
-                let vi = usize::try_from(tri.vertex[i]).unwrap();
+                let vi = usize::from(tri.vertex[i]);
                 let vertex = &raw_vertices[vi];
                 // NB: pay attention to the assingments here as we swap z and y
                 let x = (frame.scale[0] * vertex.v[0] as f32) + frame.translate[0];
@@ -261,15 +258,15 @@ impl MD2 {
             let vertices = MD2::read_and_decompress_vertices(reader, num_xyz, &frame, triangles);
 
             let curr_name = frame.get_name();
-            if let Some(prev_name) = last_frame_name {
-                if prev_name != curr_name {
-                    animations.push(Animation {
-                        name: prev_name.clone(),
-                        key_frames,
-                    });
+            if let Some(prev_name) = last_frame_name
+                && prev_name != curr_name
+            {
+                animations.push(Animation {
+                    name: prev_name.clone(),
+                    key_frames,
+                });
 
-                    key_frames = Vec::new();
-                }
+                key_frames = Vec::new();
             }
             last_frame_name = Some(curr_name);
 
@@ -287,17 +284,28 @@ impl MD2 {
     }
 
     fn find_skins(fpath: &Path) -> Vec<Skin> {
-        let glob_path = fpath.parent().unwrap().join("*.png");
-        let pattern = glob_path.to_str().unwrap();
-        let mut skins = Vec::new();
+        let extensions = ["*.pcx", "*.png"];
+        let mut skins = HashMap::new();
 
-        for entry in glob(pattern).unwrap().filter_map(Result::ok) {
-            let path = entry.strip_prefix("assets").unwrap().to_path_buf();
-            let name = path.file_stem().unwrap().to_str().unwrap().to_string();
-            skins.push(Skin { name, path });
+        for ext in extensions {
+            let glob_path = fpath.parent().unwrap().join(ext);
+            let pattern = glob_path.to_str().unwrap();
+
+            for entry in glob(pattern).unwrap().filter_map(Result::ok) {
+                let path = entry.strip_prefix("assets").unwrap().to_path_buf();
+                let name = path.file_stem().unwrap().to_str().unwrap().to_string();
+
+                skins.entry(name).or_insert(path);
+            }
         }
 
         skins
+            .iter()
+            .map(|(k, v)| Skin {
+                name: k.clone(),
+                path: v.clone(),
+            })
+            .collect()
     }
 }
 
@@ -398,8 +406,7 @@ impl MD2Component {
 
         let curr_v = &self.md2.animations[self.anim_idx].key_frames[current];
         let next_v = &self.md2.animations[self.anim_idx].key_frames[next];
-        let mut v = Vec::new();
-        v.reserve(curr_v.len());
+        let mut v = Vec::with_capacity(curr_v.len());
 
         for i in 0..curr_v.len() {
             v.push(curr_v[i].lerp(next_v[i], interp));
@@ -453,13 +460,7 @@ impl MD2Resource {
             .unwrap()
             .to_str()
             .unwrap();
-
-        if fpath.file_name().unwrap() != "tris.md2" {
-            let fstem = fpath.file_stem().unwrap().to_str().unwrap();
-            format!("{}/{}", model, fstem)
-        } else {
-            model.to_string()
-        }
+        model.to_string()
     }
 }
 
