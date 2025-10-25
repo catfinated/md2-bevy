@@ -8,11 +8,17 @@ use bevy::{
 use glob::glob;
 use rand::prelude::*;
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+use std::fs;
 use std::path::{Path, PathBuf};
+use thiserror::Error;
 
-use bevy::prelude::{Vec2, Vec3};
+#[derive(Debug, Error)]
+pub enum Md2LoaderError {
+    #[error("Failed to read MD2 file: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("Invalid MD2 format: {0}")]
+    InvalidFormat(String),
+}
 
 /// MD2 file header
 #[derive(Debug)]
@@ -37,12 +43,44 @@ struct Header {
     offset_end: i32,
 }
 
+impl Header {
+    fn from_bytes(data: &[u8]) -> Result<Header, Md2LoaderError> {
+        assert!(std::mem::size_of::<Header>() == 68);
+
+        if data.len() < std::mem::size_of::<Header>() {
+            return Err(Md2LoaderError::InvalidFormat(
+                "Not enough bytes for header".to_string(),
+            ));
+        }
+
+        let hdr_bytes: [u8; std::mem::size_of::<Header>()] =
+            data[0..std::mem::size_of::<Header>()].try_into().unwrap();
+        // TODO: remove unsafe block
+        let header: Header = unsafe { std::mem::transmute(hdr_bytes) };
+        Ok(header)
+    }
+}
+
 /// Scaled texture coordinates
 #[derive(Debug)]
 #[repr(C)]
 struct TexCoord {
     s: i16,
     t: i16,
+}
+
+impl TexCoord {
+    fn from_bytes(data: &[u8]) -> Result<TexCoord, Md2LoaderError> {
+        if data.len() < std::mem::size_of::<TexCoord>() {
+            return Err(Md2LoaderError::InvalidFormat(
+                "Not enough bytes for texcoord".to_string(),
+            ));
+        }
+
+        let s = i16::from_le_bytes([data[0], data[1]]);
+        let t = i16::from_le_bytes([data[2], data[3]]);
+        Ok(TexCoord { s, t })
+    }
 }
 
 /// MD2 Indexed triangle
@@ -53,12 +91,50 @@ struct Triangle {
     st: [u16; 3],
 }
 
+impl Triangle {
+    fn from_bytes(data: &[u8]) -> Result<Triangle, Md2LoaderError> {
+        if data.len() < std::mem::size_of::<Triangle>() {
+            return Err(Md2LoaderError::InvalidFormat(
+                "Not enough bytes for triangle".to_string(),
+            ));
+        }
+
+        let vertex = [
+            u16::from_le_bytes(data[0..2].try_into().unwrap()),
+            u16::from_le_bytes(data[2..4].try_into().unwrap()),
+            u16::from_le_bytes(data[4..6].try_into().unwrap()),
+        ];
+
+        let st = [
+            u16::from_le_bytes(data[6..8].try_into().unwrap()),
+            u16::from_le_bytes(data[8..10].try_into().unwrap()),
+            u16::from_le_bytes(data[10..12].try_into().unwrap()),
+        ];
+
+        Ok(Triangle { vertex, st })
+    }
+}
+
 /// MD2 Scaled 3d vertex
 #[derive(Debug)]
 #[repr(C)]
 struct Vertex {
     v: [u8; 3],
     normal_index: u8,
+}
+
+impl Vertex {
+    fn from_bytes(data: &[u8]) -> Result<Vertex, Md2LoaderError> {
+        if data.len() < std::mem::size_of::<Vertex>() {
+            return Err(Md2LoaderError::InvalidFormat(
+                "Not enough bytes for vertex".to_string(),
+            ));
+        }
+
+        let v: [u8; 3] = data[0..3].try_into().unwrap();
+        let normal_index = data[3];
+        Ok(Vertex { v, normal_index })
+    }
 }
 
 /// MD2 Animation key frame
@@ -68,6 +144,46 @@ struct Frame {
     scale: [f32; 3],
     translate: [f32; 3],
     name: [u8; 16],
+}
+
+impl Frame {
+    fn from_bytes(data: &[u8]) -> Result<Frame, Md2LoaderError> {
+        if data.len() < std::mem::size_of::<Frame>() {
+            return Err(Md2LoaderError::InvalidFormat(
+                "Not enough bytes for frame".to_string(),
+            ));
+        }
+
+        let scale = [
+            f32::from_le_bytes(data[0..4].try_into().unwrap()),
+            f32::from_le_bytes(data[4..8].try_into().unwrap()),
+            f32::from_le_bytes(data[8..12].try_into().unwrap()),
+        ];
+
+        let translate = [
+            f32::from_le_bytes(data[12..16].try_into().unwrap()),
+            f32::from_le_bytes(data[16..20].try_into().unwrap()),
+            f32::from_le_bytes(data[20..24].try_into().unwrap()),
+        ];
+
+        let name: [u8; 16] = data[24..40].try_into().unwrap();
+
+        Ok(Frame {
+            scale,
+            translate,
+            name,
+        })
+    }
+
+    fn get_name(&self) -> String {
+        let s = String::from_utf8_lossy(&self.name);
+        let mut end = s.len();
+        if let Some(index) = s.find(|c: char| c.is_ascii_digit() || c.is_ascii_control()) {
+            end = index;
+        }
+
+        s[0..end].to_string()
+    }
 }
 
 type KeyFrame = Vec<Vec3>;
@@ -97,94 +213,58 @@ struct MD2 {
     skins: Vec<Skin>,
 }
 
-/// MD2 Bevy Component
-///
-/// Allows changing the current animation and skin.
-#[derive(Component)]
-pub struct MD2Component {
-    md2: MD2,
-    pub skin_idx: usize,
-    pub anim_idx: usize,
-    curr_frame: usize,
-    interp: f32,
-    materials: Vec<Option<Handle<StandardMaterial>>>,
-}
-
-/// Resource for available MD2 models
-///
-/// Tracks which model is currently selected.
-#[derive(Resource)]
-pub struct MD2Resource {
-    fpaths: Vec<PathBuf>,
-    pub names: Vec<String>,
-    pub curr_idx: usize,
-}
-
-impl Frame {
-    fn get_name(&self) -> String {
-        let s = String::from_utf8_lossy(&self.name);
-        let mut end = s.len();
-        if let Some(index) = s.find(|c: char| c.is_ascii_digit() || c.is_ascii_control()) {
-            end = index;
-        }
-
-        s[0..end].to_string()
-    }
-}
-
 impl MD2 {
-    pub fn load(fpath: &Path) -> MD2 {
-        let inf = File::open(fpath).unwrap();
-        let mut reader = BufReader::new(inf);
-
-        // load header
-        let mut buffer = [0; std::mem::size_of::<Header>()];
-        reader.read_exact(&mut buffer).unwrap();
-        let header: Header = unsafe { std::mem::transmute(buffer) };
-
-        let triangles = MD2::load_triangles(&mut reader, &header);
-        let texcoords = MD2::load_texcoords(&mut reader, &header, &triangles);
-        let animations = MD2::load_animations(&mut reader, &header, &triangles);
+    pub fn load(fpath: &Path) -> Result<MD2, Md2LoaderError> {
+        let data = fs::read(fpath)?;
+        let header = Header::from_bytes(&data)?;
+        let triangles = MD2::load_triangles(&data, &header)?;
+        let texcoords = MD2::load_texcoords(&data, &header, &triangles)?;
+        let animations = MD2::load_animations(&data, &header, &triangles)?;
         let skins = MD2::find_skins(fpath); // skins - only from directory right now
 
-        MD2 {
+        Ok(MD2 {
             animations,
             texcoords,
             skins,
-        }
+        })
     }
 
-    fn load_triangles<R: BufRead + Seek>(reader: &mut R, header: &Header) -> Vec<Triangle> {
-        let mut triangles = Vec::new();
-        let num_tris = usize::try_from(header.num_tris).unwrap();
-        triangles.reserve(num_tris);
-        let tris_off = u64::try_from(header.offset_tris).unwrap();
-        reader.seek(SeekFrom::Start(tris_off)).unwrap();
+    fn load_triangles(data: &[u8], header: &Header) -> Result<Vec<Triangle>, Md2LoaderError> {
+        let num_tris = usize::try_from(header.num_tris).map_err(|err| {
+            Md2LoaderError::InvalidFormat(format!("Invalid number of triangles - {}", err))
+        })?;
+        let tris_off = usize::try_from(header.offset_tris).map_err(|err| {
+            Md2LoaderError::InvalidFormat(format!("Invalid triangles offset - {}", err))
+        })?;
 
-        for _ in 0..header.num_tris {
-            let mut tbuf = [0; std::mem::size_of::<Triangle>()];
-            reader.read_exact(&mut tbuf).unwrap();
-            let triangle: Triangle = unsafe { std::mem::transmute(tbuf) };
+        let mut triangles = Vec::with_capacity(num_tris);
+
+        for i in 0..header.num_tris {
+            let off = tris_off + (i as usize * std::mem::size_of::<Triangle>());
+            let triangle = Triangle::from_bytes(&data[off..])?;
             triangles.push(triangle);
         }
 
-        triangles
+        Ok(triangles)
     }
 
-    fn load_texcoords<R: BufRead + Seek>(
-        reader: &mut R,
+    fn load_texcoords(
+        data: &[u8],
         header: &Header,
         triangles: &Vec<Triangle>,
-    ) -> Vec<Vec2> {
-        let num_st = usize::try_from(header.num_st).unwrap();
-        let st_off = u64::try_from(header.offset_st).unwrap();
-        let mut unscaled_texcoords = Vec::with_capacity(num_st);
-        reader.seek(SeekFrom::Start(st_off)).unwrap();
+    ) -> Result<Vec<Vec2>, Md2LoaderError> {
+        let num_st = usize::try_from(header.num_st).map_err(|err| {
+            Md2LoaderError::InvalidFormat(format!("Invalid number of texcoords - {}", err))
+        })?;
+        let st_off = usize::try_from(header.offset_st).map_err(|err| {
+            Md2LoaderError::InvalidFormat(format!("Invalid texcoords offset - {}", err))
+        })?;
 
-        for _ in 0..num_st {
-            let mut stbuf = [0; std::mem::size_of::<TexCoord>()];
-            reader.read_exact(&mut stbuf).unwrap();
-            let texcoord: TexCoord = unsafe { std::mem::transmute(stbuf) };
+        let mut unscaled_texcoords = Vec::with_capacity(num_st);
+
+        for i in 0..num_st {
+            let off = st_off + (i * std::mem::size_of::<TexCoord>());
+            let texcoord = TexCoord::from_bytes(&data[off..])?;
             unscaled_texcoords.push(texcoord);
         }
 
@@ -203,21 +283,20 @@ impl MD2 {
             }
         }
 
-        texcoords
+        Ok(texcoords)
     }
 
-    fn read_and_decompress_vertices<R: BufRead + Seek>(
-        reader: &mut R,
+    fn read_and_decompress_vertices(
+        data: &[u8],
         num_xyz: usize,
         frame: &Frame,
         triangles: &Vec<Triangle>,
-    ) -> Vec<Vec3> {
+    ) -> Result<Vec<Vec3>, Md2LoaderError> {
         let mut raw_vertices: Vec<Vertex> = Vec::with_capacity(num_xyz);
 
-        for _ in 0..num_xyz {
-            let mut vbuf = [0; std::mem::size_of::<Vertex>()];
-            reader.read_exact(&mut vbuf).unwrap();
-            let vertex: Vertex = unsafe { std::mem::transmute(vbuf) };
+        for i in 0..num_xyz {
+            let off = i * std::mem::size_of::<Vertex>();
+            let vertex = Vertex::from_bytes(&data[off..])?;
             raw_vertices.push(vertex);
         }
 
@@ -235,27 +314,32 @@ impl MD2 {
             }
         }
 
-        vertices
+        Ok(vertices)
     }
 
-    fn load_animations<R: BufRead + Seek>(
-        reader: &mut R,
+    fn load_animations(
+        data: &[u8],
         header: &Header,
         triangles: &Vec<Triangle>,
-    ) -> Vec<Animation> {
-        let num_xyz = usize::try_from(header.num_xyz).unwrap();
+    ) -> Result<Vec<Animation>, Md2LoaderError> {
+        let num_xyz = usize::try_from(header.num_xyz).map_err(|err| {
+            Md2LoaderError::InvalidFormat(format!("Invalid number of vertices - {}", err))
+        })?;
+        let frames_off = usize::try_from(header.offset_frames).map_err(|err| {
+            Md2LoaderError::InvalidFormat(format!("Invalid frames offset - {}", err))
+        })?;
+
         let mut key_frames: Vec<KeyFrame> = Vec::new();
         let mut animations: Vec<Animation> = Vec::new();
         let mut last_frame_name: Option<String> = None;
-        let frames_off = u64::try_from(header.offset_frames).unwrap();
-
-        reader.seek(SeekFrom::Start(frames_off)).unwrap();
+        let mut off = frames_off;
 
         for _ in 0..header.num_frames {
-            let mut fbuf = [0; std::mem::size_of::<Frame>()];
-            reader.read_exact(&mut fbuf).unwrap();
-            let frame: Frame = unsafe { std::mem::transmute(fbuf) };
-            let vertices = MD2::read_and_decompress_vertices(reader, num_xyz, &frame, triangles);
+            let frame = Frame::from_bytes(&data[off..])?;
+            off += std::mem::size_of::<Frame>();
+            let vertices =
+                MD2::read_and_decompress_vertices(&data[off..], num_xyz, &frame, triangles)?;
+            off += num_xyz * std::mem::size_of::<Vertex>();
 
             let curr_name = frame.get_name();
             if let Some(prev_name) = last_frame_name
@@ -280,7 +364,7 @@ impl MD2 {
             });
         }
 
-        animations
+        Ok(animations)
     }
 
     fn find_skins(fpath: &Path) -> Vec<Skin> {
@@ -309,9 +393,22 @@ impl MD2 {
     }
 }
 
+/// MD2 Bevy Component
+///
+/// Allows changing the current animation and skin.
+#[derive(Component)]
+pub struct MD2Component {
+    md2: MD2,
+    pub skin_idx: usize,
+    pub anim_idx: usize,
+    curr_frame: usize,
+    interp: f32,
+    materials: Vec<Option<Handle<StandardMaterial>>>,
+}
+
 impl MD2Component {
     fn load(fpath: &Path) -> Self {
-        let md2 = MD2::load(fpath);
+        let md2 = MD2::load(fpath).unwrap();
         let skin_idx = rand::rng().random_range(0..md2.skins.len());
         let anim_idx = rand::rng().random_range(0..md2.animations.len());
         let materials: Vec<Option<Handle<StandardMaterial>>> = vec![None; md2.skins.len()];
@@ -426,6 +523,16 @@ impl MD2Component {
         )
         .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, self.md2.texcoords.clone())
     }
+}
+
+/// Resource for available MD2 models
+///
+/// Tracks which model is currently selected.
+#[derive(Resource)]
+pub struct MD2Resource {
+    fpaths: Vec<PathBuf>,
+    pub names: Vec<String>,
+    pub curr_idx: usize,
 }
 
 impl MD2Resource {
