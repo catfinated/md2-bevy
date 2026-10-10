@@ -546,7 +546,11 @@ impl MD2Resource {
             .iter()
             .map(|p| MD2Resource::get_model_name(p.as_path()))
             .collect();
-        let curr_idx = rand::rng().random_range(0..fpaths.len());
+        let curr_idx = if fpaths.is_empty() {
+            0
+        } else {
+            rand::rng().random_range(0..fpaths.len())
+        };
         let assets = Vec::new();
 
         MD2Resource {

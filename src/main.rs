@@ -39,7 +39,20 @@ fn main() {
         .run();
 }
 
-fn preload(mut commands: Commands, mut next_state: ResMut<NextState<AppState>>) {
+fn preload(
+    mut commands: Commands,
+    mut next_state: ResMut<NextState<AppState>>,
+    all_md2: Res<MD2Resource>,
+    mut exit: MessageWriter<AppExit>,
+) {
+    if all_md2.fpaths.is_empty() {
+        error!(
+            "No .md2 models found under the assets directory. Extract them from your Quake 2 \
+             PAK files into assets/ (see README)."
+        );
+        exit.write(AppExit::error());
+        return;
+    }
     next_state.set(AppState::Loading);
     commands.spawn((
         // The `PrimaryEguiContext` component requires everything needed to render a primary context.
