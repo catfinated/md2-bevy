@@ -124,6 +124,91 @@ impl Pak {
     }
 }
 
+/// An ordered set of archives where later archives override earlier ones
+#[derive(Debug, Default)]
+pub struct PakSet {
+    paks: Vec<Pak>,
+}
+
+impl PakSet {
+    pub fn new(paks: Vec<Pak>) -> Self {
+        PakSet { paks }
+    }
+
+    /// Load every `pak*.pak` file in a directory, sorted by file name
+    pub fn load_dir(dpath: &Path) -> PakSet {
+        let mut fpaths: Vec<PathBuf> = std::fs::read_dir(dpath)
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| {
+                let name = p
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or_default()
+                    .to_lowercase();
+                name.starts_with("pak") && name.ends_with(".pak")
+            })
+            .collect();
+        fpaths.sort();
+
+        let mut paks = Vec::new();
+        for fpath in fpaths {
+            match Pak::open(&fpath) {
+                Ok(pak) => {
+                    info!("loaded {} ({} entries)", fpath.display(), pak.entries.len());
+                    paks.push(pak);
+                }
+                Err(err) => warn!("skipping {}: {err}", fpath.display()),
+            }
+        }
+
+        PakSet { paks }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.paks.is_empty()
+    }
+
+    pub fn read(&self, name: &str) -> Option<std::io::Result<Vec<u8>>> {
+        self.paks.iter().rev().find_map(|pak| pak.read(name))
+    }
+
+    /// All distinct entry names, sorted
+    pub fn names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .paks
+            .iter()
+            .flat_map(|p| p.names())
+            .map(str::to_string)
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    /// Entries ending in `ext` (e.g. `.md2`), sorted
+    pub fn find_ext(&self, ext: &str) -> Vec<String> {
+        self.names()
+            .into_iter()
+            .filter(|n| n.ends_with(ext))
+            .collect()
+    }
+
+    /// Entries directly inside `dir` (e.g. `models/monsters/berserk`) ending in one of `exts`
+    pub fn find_in_dir(&self, dir: &str, exts: &[&str]) -> Vec<String> {
+        let dir = dir.to_lowercase();
+        self.names()
+            .into_iter()
+            .filter(|n| {
+                n.rsplit_once('/').is_some_and(|(parent, _)| parent == dir)
+                    && exts.iter().any(|ext| n.ends_with(ext))
+            })
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -187,5 +272,44 @@ mod tests {
         assert!(Pak::open(&write_pak(dpath, "trunc.pak", truncated)).is_err());
 
         assert!(Pak::open(&write_pak(dpath, "short.pak", b"PACK")).is_err());
+    }
+
+    #[test]
+    fn later_paks_override_earlier() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dpath = tmp.path();
+        write_pak(
+            dpath,
+            "pak0.pak",
+            &build_pak(&[("a.md2", b"old"), ("b.md2", b"b")]),
+        );
+        write_pak(dpath, "pak1.pak", &build_pak(&[("a.md2", b"new")]));
+        write_pak(dpath, "other.pak", &build_pak(&[("c.md2", b"c")]));
+
+        let set = PakSet::load_dir(dpath);
+        assert_eq!(set.read("a.md2").unwrap().unwrap(), b"new");
+        assert_eq!(set.find_ext(".md2"), vec!["a.md2", "b.md2"]);
+    }
+
+    #[test]
+    fn finds_entries_in_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dpath = tmp.path();
+        write_pak(
+            dpath,
+            "pak0.pak",
+            &build_pak(&[
+                ("models/foo/tris.md2", b"1"),
+                ("models/foo/skin.pcx", b"2"),
+                ("models/foo/sub/skin.pcx", b"3"),
+                ("models/bar/skin.pcx", b"4"),
+            ]),
+        );
+
+        let set = PakSet::load_dir(dpath);
+        assert_eq!(
+            set.find_in_dir("models/foo", &[".pcx"]),
+            vec!["models/foo/skin.pcx"]
+        );
     }
 }
