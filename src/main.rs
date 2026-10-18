@@ -152,7 +152,7 @@ fn animation_system(
     let (mesh, mut md2c) = query.single_mut().unwrap();
     let md2 = md2s.get(&md2c.handle).unwrap();
     let vertices = md2c.animate(time.delta_secs(), md2);
-    let m = meshes.get_mut(mesh.id()).unwrap();
+    let mut m = meshes.get_mut(mesh.id()).unwrap();
     m.insert_attribute(Mesh::ATTRIBUTE_POSITION, vertices);
 }
 

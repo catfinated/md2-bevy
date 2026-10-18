@@ -13,7 +13,7 @@ pub enum PcxLoaderError {
 }
 
 /// The PCX asset loader
-#[derive(Default)]
+#[derive(Default, TypePath)]
 pub struct PcxLoader;
 
 const HDR_BYTES: usize = 128;

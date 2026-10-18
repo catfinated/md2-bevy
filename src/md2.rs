@@ -429,7 +429,7 @@ impl MD2 {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, TypePath)]
 pub struct Md2Loader;
 
 impl AssetLoader for Md2Loader {
@@ -446,7 +446,7 @@ impl AssetLoader for Md2Loader {
         let mut bytes = Vec::new();
         reader.read_to_end(&mut bytes).await?;
 
-        let mut md2 = MD2::from_bytes(&bytes, load_context.path())?;
+        let mut md2 = MD2::from_bytes(&bytes, load_context.path().path())?;
 
         for skin in &md2.skins {
             let path = AssetPath::from_path_buf(skin.path.clone());
