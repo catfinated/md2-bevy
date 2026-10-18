@@ -26,6 +26,6 @@ target
 /target
 
 .DS_Store
-
 # Game assets (extracted from Quake 2 PAK files)
 /assets/
+
