@@ -1,9 +1,13 @@
 //! Quake 2 `.pak` archive support
+use bevy::asset::io::{
+    AssetReader, AssetReaderError, AssetSourceBuilder, ErasedAssetReader, PathStream, VecReader,
+};
 use bevy::prelude::*;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use thiserror::Error;
 
 const MAGIC: &[u8; 4] = b"PACK";
@@ -209,9 +213,45 @@ impl PakSet {
     }
 }
 
+struct PakAssetReader(Arc<PakSet>);
+
+impl AssetReader for PakAssetReader {
+    async fn read<'a>(
+        &'a self,
+        path: &'a Path,
+    ) -> Result<impl bevy::asset::io::Reader + 'a, AssetReaderError> {
+        let name = path.to_string_lossy().replace('\\', "/");
+        match self.0.read(&name) {
+            Some(Ok(bytes)) => Ok(VecReader::new(bytes)),
+            Some(Err(err)) => Err(AssetReaderError::Io(Arc::new(err))),
+            None => Err(AssetReaderError::NotFound(path.to_path_buf())),
+        }
+    }
+
+    async fn read_meta<'a>(
+        &'a self,
+        path: &'a Path,
+    ) -> Result<impl bevy::asset::io::Reader + 'a, AssetReaderError> {
+        // no meta files in archives, use the loader defaults
+        Err::<VecReader, _>(AssetReaderError::NotFound(path.to_path_buf()))
+    }
+
+    async fn read_directory<'a>(
+        &'a self,
+        path: &'a Path,
+    ) -> Result<Box<PathStream>, AssetReaderError> {
+        Err(AssetReaderError::NotFound(path.to_path_buf()))
+    }
+
+    async fn is_directory<'a>(&'a self, _path: &'a Path) -> Result<bool, AssetReaderError> {
+        Ok(false)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy::asset::io::Reader;
     use std::io::Write;
 
     /// Build PAK bytes from (name, data) pairs
@@ -310,6 +350,98 @@ mod tests {
         assert_eq!(
             set.find_in_dir("models/foo", &[".pcx"]),
             vec!["models/foo/skin.pcx"]
+        );
+    }
+
+    /// Build a reader over a single `pak0.pak` containing `files`
+    fn reader_for(dpath: &Path, files: &[(&str, &[u8])]) -> PakAssetReader {
+        write_pak(dpath, "pak0.pak", &build_pak(files));
+        PakAssetReader(Arc::new(PakSet::load_dir(dpath)))
+    }
+
+    /// Read a whole entry through the `AssetReader` interface
+    fn read_all(reader: &PakAssetReader, path: &str) -> Result<Vec<u8>, AssetReaderError> {
+        bevy::tasks::block_on(async {
+            let mut r = AssetReader::read(reader, Path::new(path)).await?;
+            let mut bytes = Vec::new();
+            r.read_to_end(&mut bytes).await.unwrap();
+            Ok(bytes)
+        })
+    }
+
+    #[test]
+    fn reader_returns_entry_bytes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reader = reader_for(tmp.path(), &[("models/foo/tris.md2", b"model")]);
+
+        assert_eq!(read_all(&reader, "models/foo/tris.md2").unwrap(), b"model");
+    }
+
+    #[test]
+    fn reader_lookup_is_case_insensitive() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reader = reader_for(tmp.path(), &[("models/foo/tris.md2", b"model")]);
+
+        assert_eq!(read_all(&reader, "MODELS/Foo/TRIS.MD2").unwrap(), b"model");
+    }
+
+    #[test]
+    fn reader_normalizes_backslashes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reader = reader_for(tmp.path(), &[("models/foo/tris.md2", b"model")]);
+
+        assert_eq!(
+            read_all(&reader, "models\\foo\\tris.md2").unwrap(),
+            b"model"
+        );
+    }
+
+    #[test]
+    fn reader_reports_missing_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reader = reader_for(tmp.path(), &[("a.md2", b"a")]);
+
+        match read_all(&reader, "missing.md2") {
+            Err(AssetReaderError::NotFound(path)) => assert_eq!(path, Path::new("missing.md2")),
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reader_reports_io_error_when_archive_is_truncated() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reader = reader_for(tmp.path(), &[("a.md2", b"0123456789")]);
+
+        // cut the file off mid-entry after the archive was indexed
+        let file = File::options()
+            .write(true)
+            .open(tmp.path().join("pak0.pak"))
+            .unwrap();
+        file.set_len(HEADER_BYTES as u64 + 2).unwrap();
+
+        assert!(matches!(
+            read_all(&reader, "a.md2"),
+            Err(AssetReaderError::Io(_))
+        ));
+    }
+
+    #[test]
+    fn reader_has_no_meta_or_directories() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reader = reader_for(tmp.path(), &[("models/foo/tris.md2", b"model")]);
+        let path = Path::new("models/foo/tris.md2");
+
+        assert!(matches!(
+            bevy::tasks::block_on(AssetReader::read_meta(&reader, path)),
+            Err(AssetReaderError::NotFound(_))
+        ));
+        assert!(matches!(
+            bevy::tasks::block_on(AssetReader::read_directory(&reader, Path::new("models"))),
+            Err(AssetReaderError::NotFound(_))
+        ));
+        assert!(
+            !bevy::tasks::block_on(AssetReader::is_directory(&reader, Path::new("models")))
+                .unwrap()
         );
     }
 }
